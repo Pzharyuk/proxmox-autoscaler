@@ -29,7 +29,6 @@ type Config struct {
 	VMStorage     string
 	ISOStorage    string
 	TalosISO      string
-	TalosISO      string
 	VMBridge      string
 	VMVLAN        int
 	VMTags        string
@@ -69,7 +68,6 @@ func LoadConfig() Config {
 		VMStorage:      envStr("VM_STORAGE", "main"),
 		ISOStorage:     envStr("ISO_STORAGE", "ISO"),
 		TalosISO:       envStr("TALOS_ISO", "ISO:iso/talos-v1.12.6-metal-amd64.iso"),
-		TalosISO:       envStr("TALOS_ISO", ""),
 		VMBridge:       envStr("VM_BRIDGE", "vmbr1"),
 		VMVLAN:         envInt("VM_VLAN", 88),
 		VMTags:         envStr("VM_TAGS", "k8s;autoscaled"),
