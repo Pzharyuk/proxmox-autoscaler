@@ -194,7 +194,7 @@ func (a *Autoscaler) scaleUp(ctx context.Context) {
 		return
 	}
 
-	if time.Since(a.lastScaleUp) < 2*time.Minute {
+	if time.Since(a.lastScaleUp) < time.Duration(a.cfg.PollInterval)*time.Second {
 		slog.Info("scale-up cooldown active")
 		return
 	}
@@ -325,7 +325,7 @@ func (a *Autoscaler) scaleDown(ctx context.Context, nodeName string) {
 		return
 	}
 
-	if time.Since(a.lastScaleDn) < 2*time.Minute {
+	if time.Since(a.lastScaleDn) < time.Duration(a.cfg.PollInterval)*time.Second {
 		slog.Info("scale-down cooldown active")
 		return
 	}
