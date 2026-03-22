@@ -92,7 +92,6 @@ type CreateVMOpts struct {
 	MemoryMB  int
 	DiskGB    int
 	Storage   string
-	ISOImport string
 	TalosISO  string
 	Bridge    string
 	VLAN      int
@@ -110,16 +109,14 @@ func (c *Client) CreateVM(opts CreateVMOpts) error {
 		"cpu":     {"host"},
 		"ostype":  {"l26"},
 		"scsihw":  {"virtio-scsi-single"},
-		"scsi0":   {fmt.Sprintf("%s:0,import-from=%s,discard=on,ssd=1,iothread=1", opts.Storage, opts.ISOImport)},
+		"scsi0":   {fmt.Sprintf("%s:%d,discard=on,ssd=1,iothread=1", opts.Storage, opts.DiskGB)},
+		"ide2":    {fmt.Sprintf("%s,media=cdrom", opts.TalosISO)},
 		"net0":    {fmt.Sprintf("virtio,bridge=%s,tag=%d", opts.Bridge, opts.VLAN)},
-		"boot":    {"order=scsi0"},
+		"boot":    {"order=scsi0;ide2"},
 		"agent":   {"1"},
-		"bios":    {"seabios"},
+		"bios":    {"ovmf"},
+		"efidisk0": {fmt.Sprintf("%s:1", opts.Storage)},
 		"machine": {"q35"},
-	}
-	if opts.TalosISO != "" {
-		data.Set("ide2", fmt.Sprintf("%s,media=cdrom", opts.TalosISO))
-		data.Set("boot", "order=scsi0;ide2")
 	}
 
 	path := fmt.Sprintf("/nodes/%s/qemu", opts.Node)

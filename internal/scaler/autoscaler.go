@@ -215,7 +215,6 @@ func (a *Autoscaler) scaleUp(ctx context.Context) {
 		MemoryMB:  a.cfg.WorkerMemoryMB,
 		DiskGB:    a.cfg.WorkerDiskGB,
 		Storage:   a.cfg.VMStorage,
-		ISOImport: a.cfg.ISOImport,
 		TalosISO:  a.cfg.TalosISO,
 		Bridge:    a.cfg.VMBridge,
 		VLAN:      a.cfg.VMVLAN,
@@ -226,21 +225,21 @@ func (a *Autoscaler) scaleUp(ctx context.Context) {
 		return
 	}
 
-	time.Sleep(15 * time.Second)
-	_ = a.pve.ResizeDisk(pveNode, vmid, a.cfg.WorkerDiskGB)
+	// Wait for VM creation task to finish
+	time.Sleep(10 * time.Second)
 
 	if err := a.pve.StartVM(pveNode, vmid); err != nil {
 		slog.Error("start VM failed", "error", err)
 		return
 	}
 
-	// Wait for DHCP IP
-	slog.Info("waiting for VM to boot", "vmid", vmid)
+	// Wait for Talos to boot from ISO and get a DHCP IP
+	slog.Info("waiting for VM to boot from Talos ISO", "vmid", vmid)
 	var dhcpIP string
-	for i := 0; i < 24; i++ {
+	for i := 0; i < 36; i++ { // 3 minutes
 		time.Sleep(5 * time.Second)
-		if ip, err := a.pve.GetVMIP(pveNode, vmid); err == nil {
-			dhcpIP = ip
+		if gotIP, err := a.pve.GetVMIP(pveNode, vmid); err == nil {
+			dhcpIP = gotIP
 			break
 		}
 	}
