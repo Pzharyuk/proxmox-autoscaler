@@ -104,8 +104,38 @@ func (a *Autoscaler) tick(ctx context.Context) {
 		}
 	}()
 
+	a.cleanupStaleNodes(ctx)
 	a.checkScaleUp(ctx)
 	a.checkScaleDown(ctx)
+}
+
+func (a *Autoscaler) cleanupStaleNodes(ctx context.Context) {
+	nodes, err := a.k8s.CoreV1().Nodes().List(ctx, metav1.ListOptions{
+		LabelSelector: a.cfg.NodeLabel,
+	})
+	if err != nil {
+		return
+	}
+	for _, node := range nodes.Items {
+		ready := false
+		for _, c := range node.Status.Conditions {
+			if c.Type == corev1.NodeReady && c.Status == corev1.ConditionTrue {
+				ready = true
+			}
+		}
+		if !ready && time.Since(node.CreationTimestamp.Time) > 5*time.Minute {
+			slog.Info("cleaning up stale NotReady node", "name", node.Name)
+			_ = a.k8s.CoreV1().Nodes().Delete(ctx, node.Name, metav1.DeleteOptions{})
+			// Also try to delete the VM
+			vms, _ := a.pve.ListVMs()
+			for _, vm := range vms {
+				if vm.Name == node.Name {
+					_ = a.pve.DeleteVM(vm.Node, vm.VMID)
+					break
+				}
+			}
+		}
+	}
 }
 
 func (a *Autoscaler) managedNodeCount(ctx context.Context) int {
