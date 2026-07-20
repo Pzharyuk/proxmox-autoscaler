@@ -27,6 +27,7 @@ type Autoscaler struct {
 	metrics      metricsv.Interface
 	pendingSince map[string]time.Time // pod UID -> first seen
 	idleSince    map[string]time.Time // node name -> first seen idle
+	provisioning map[string]bool      // VM names currently mid-join (protected from orphan GC)
 	mu           sync.Mutex
 	scalingUp    bool
 	lastScaleUp  time.Time
@@ -69,6 +70,7 @@ func New(cfg Config) (*Autoscaler, error) {
 		metrics:      metricsClient,
 		pendingSince: make(map[string]time.Time),
 		idleSince:    make(map[string]time.Time),
+		provisioning: make(map[string]bool),
 	}, nil
 }
 
@@ -105,8 +107,61 @@ func (a *Autoscaler) tick(ctx context.Context) {
 	}()
 
 	a.cleanupStaleNodes(ctx)
+	a.cleanupOrphanVMs(ctx)
 	a.checkScaleUp(ctx)
 	a.checkScaleDown(ctx)
+}
+
+// cleanupOrphanVMs reaps k8s-autoscale-* VMs that never became cluster nodes.
+// cleanupStaleNodes only handles VMs that registered and then went NotReady; a
+// VM that fails BEFORE it ever joins has no Node object, so it is invisible to
+// that path and would otherwise leak forever (this is how 30+ orphan VMs
+// accumulated). VMs currently mid-join (tracked in a.provisioning) are skipped
+// so we never kill a node that is still legitimately trying to join.
+func (a *Autoscaler) cleanupOrphanVMs(ctx context.Context) {
+	vms, err := a.pve.ListVMs()
+	if err != nil {
+		return
+	}
+	nodes, err := a.k8s.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return
+	}
+	isNode := make(map[string]bool, len(nodes.Items))
+	for _, n := range nodes.Items {
+		isNode[n.Name] = true
+	}
+	a.mu.Lock()
+	provisioning := make(map[string]bool, len(a.provisioning))
+	for k := range a.provisioning {
+		provisioning[k] = true
+	}
+	a.mu.Unlock()
+
+	for _, vm := range orphanVMsToReap(vms, isNode, provisioning) {
+		slog.Info("cleaning up orphan VM (never joined cluster)", "name", vm.Name, "vmid", vm.VMID, "pveNode", vm.Node)
+		if err := a.pve.DeleteVM(vm.Node, vm.VMID); err != nil {
+			slog.Warn("failed to delete orphan VM", "name", vm.Name, "vmid", vm.VMID, "error", err)
+		}
+	}
+}
+
+// orphanVMsToReap is the pure decision: an autoscaler VM should be reaped iff it
+// carries the k8s-autoscale- prefix, is NOT a registered node, and is NOT
+// currently being provisioned. Non-autoscaler VMs (static nodes, unrelated VMs)
+// are never selected.
+func orphanVMsToReap(vms []proxmox.VM, isNode, provisioning map[string]bool) []proxmox.VM {
+	var out []proxmox.VM
+	for _, vm := range vms {
+		if !strings.HasPrefix(vm.Name, "k8s-autoscale-") {
+			continue
+		}
+		if isNode[vm.Name] || provisioning[vm.Name] {
+			continue
+		}
+		out = append(out, vm)
+	}
+	return out
 }
 
 func (a *Autoscaler) cleanupStaleNodes(ctx context.Context) {
@@ -236,6 +291,17 @@ func (a *Autoscaler) scaleUp(ctx context.Context) {
 	name := fmt.Sprintf("k8s-autoscale-%02d", workerNum)
 
 	slog.Info("SCALE UP", "name", name, "vmid", vmid, "node", pveNode, "ip", ip)
+
+	// Protect this VM from orphan GC while it is being provisioned / waiting to
+	// join; cleared when scaleUp returns (join succeeded or timed out).
+	a.mu.Lock()
+	a.provisioning[name] = true
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		delete(a.provisioning, name)
+		a.mu.Unlock()
+	}()
 
 	opts := proxmox.CreateVMOpts{
 		VMID:      vmid,
