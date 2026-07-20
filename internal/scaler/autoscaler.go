@@ -230,7 +230,7 @@ func (a *Autoscaler) scaleUp(ctx context.Context) {
 	}
 
 	vmid := a.nextVMID()
-	ip := a.nextIP(ctx)
+	ip := a.nextIP(ctx, vmid)
 	pveNode := a.pickProxmoxNode()
 	workerNum := vmid - a.cfg.VMIDStart + 1
 	name := fmt.Sprintf("k8s-autoscale-%02d", workerNum)
@@ -446,23 +446,40 @@ func (a *Autoscaler) nextVMID() int {
 	return vmid
 }
 
-func (a *Autoscaler) nextIP(ctx context.Context) string {
-	nodes, _ := a.k8s.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+// nextIP assigns a deterministic per-VM IP derived from the vmid. The previous
+// implementation deduped only against IPs of already-joined k8s nodes; because a
+// freshly-created VM has not joined yet, every scale-up in a bootstrapping window
+// saw an empty used-IP set and returned IPBase.IPStart (e.g. 10.43.80.50) for
+// EVERY node. Those nodes collided on one IP, never joined, and the loop spawned
+// orphan VMs indefinitely.
+//
+// vmid is already unique (nextVMID dedupes against existing Proxmox VMs), so
+// offsetting IPStart by (vmid - VMIDStart) yields a unique, stable IP per VM
+// with no dependency on nodes having joined yet. The joined-node set is still
+// consulted as a defensive check to skip any address already in use (e.g. a
+// static node whose IP happens to fall in the band).
+func (a *Autoscaler) nextIP(ctx context.Context, vmid int) string {
 	usedIPs := make(map[string]bool)
-	for _, n := range nodes.Items {
-		for _, addr := range n.Status.Addresses {
-			if addr.Type == corev1.NodeInternalIP {
-				usedIPs[addr.Address] = true
+	if nodes, err := a.k8s.CoreV1().Nodes().List(ctx, metav1.ListOptions{}); err == nil {
+		for _, n := range nodes.Items {
+			for _, addr := range n.Status.Addresses {
+				if addr.Type == corev1.NodeInternalIP {
+					usedIPs[addr.Address] = true
+				}
 			}
 		}
 	}
+	base := a.cfg.IPStart + (vmid - a.cfg.VMIDStart)
+	if base < a.cfg.IPStart {
+		base = a.cfg.IPStart
+	}
 	for offset := 0; offset < 100; offset++ {
-		ip := fmt.Sprintf("%s.%d", a.cfg.IPBase, a.cfg.IPStart+offset)
+		ip := fmt.Sprintf("%s.%d", a.cfg.IPBase, base+offset)
 		if !usedIPs[ip] {
 			return ip
 		}
 	}
-	return fmt.Sprintf("%s.%d", a.cfg.IPBase, a.cfg.IPStart)
+	return fmt.Sprintf("%s.%d", a.cfg.IPBase, base)
 }
 
 func (a *Autoscaler) pickProxmoxNode() string {
